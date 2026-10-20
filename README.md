@@ -1,299 +1,107 @@
-# Multi-Drone Agricultural System
+<div align="center">
 
-**Made by Shaan Shoukath**
+# 🌾 Arkairo
 
-A production-grade ROS 2 dual-drone system for **fully autonomous** field surveying and precision spraying with **direct telemetry communication** between drones.
+### Autonomous dual-drone crop-disease survey & precision spraying on ROS 2
 
-![ROS2](https://img.shields.io/badge/ROS2-Jazzy-blue)
+Drone-1 surveys the field and finds diseased plants. Drone-2 flies to each one and sprays it.
+No ground operator in the loop. Geotags travel over the existing MAVLink telemetry radios.
+
+![ROS 2 Jazzy](https://img.shields.io/badge/ROS_2-Jazzy-22314E?logo=ros)
+![ArduPilot](https://img.shields.io/badge/ArduPilot-Copter-orange)
+![MAVLink](https://img.shields.io/badge/MAVLink-MAVROS-blue)
+![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white)
+![OpenCV](https://img.shields.io/badge/OpenCV-HSV%20detection-5C3EE8?logo=opencv&logoColor=white)
+![Hardware](https://img.shields.io/badge/Cube_Orange%2B-Raspberry_Pi_5-informational)
 ![License](https://img.shields.io/badge/License-Apache%202.0-green)
-![Packages](https://img.shields.io/badge/Drone1-7-orange)
-![Packages](https://img.shields.io/badge/Drone2-6-orange)
-![Autonomous](https://img.shields.io/badge/Mode-Fully%20Autonomous-brightgreen)
+
+`ros2` `drone` `uav` `ardupilot` `mavros` `mavlink` `precision-agriculture` `crop-disease-detection` `computer-vision` `visual-servoing` `multi-drone` `autonomous-flight`
+
+</div>
 
 ---
 
-## 🏗️ Architecture Overview
+## Contents
+
+[How it works](#how-it-works) · [Repository layout](#repository-layout) · [Nodes](#nodes) · [Quick start](#quick-start) · [Testing](#testing) · [Topics](#topic-reference) · [Design rules](#design-rules) · [Docs](#documentation) · [License](#license)
+
+---
+
+## How it works
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                     FULLY AUTONOMOUS OPERATION                               │
-│           Drone-1 (Survey) ──► GCS Forwarder ──► Drone-2 (Sprayer)           │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Drone-1 (Survey)           GCS Laptop          Drone-2 (Sprayer)            │
-│  ┌───────────────┐    ┌──────────────────┐    ┌─────────────────────┐        │
-│  │ KML→Auto-Arm  │    │  GCS Forwarder   │    │ IDLE until geotag   │        │
-│  │ Takeoff       │    │  (pymavlink)     │    │ Unified Navigation  │        │
-│  │ Survey        │═══►│  Filters GEOTAG  │═══►│ (ARM→NAV→SPRAY)     │        │
-│  │ Detect→Geotag │ A  │  from SYSID=1    │ B  │ Merged Detection+   │        │
-│  │ RTL           │    │  Dedup + Forward │    │ Centering           │        │
-│  └───────────────┘    └──────────────────┘    └─────────────────────┘        │
-│       Radio A                                      Radio B                   │
-│  (SiK 915MHz Air)         GCS Ground              (SiK 915MHz Air)           │
-│  ┌───────────┐        ┌──────────────┐         ┌───────────┐                 │
-│  │ Cube      │~~~~~~~~│ /dev/ttyUSB0 │         │ Cube      │                 │
-│  │ Orange+   │  RF    │ /dev/ttyUSB1 │~~~~RF~~~│ Orange+   │                 │
-│  │ TEL1 Port │        │ (2× USB SiK) │         │ TEL1 Port │                 │
-│  └───────────┘        └──────────────┘         └───────────┘                 │
-│                                                                              │
-│  🛡️ TF-Luna Object Avoidance: Handled by ArduPilot (Cube Orange+)            │
-│  ⚡ Optimized Architecture: Merged nodes reduce latency                      │
-└──────────────────────────────────────────────────────────────────────────────┘
+ Drone-1 (Survey)            GCS laptop                Drone-2 (Sprayer)
+┌─────────────────┐       ┌─────────────────┐       ┌─────────────────────┐
+│ KML → lanes     │       │  GCS Forwarder  │       │ Idle until a geotag │
+│ Auto arm/takeoff│ SiK A │  (pymavlink)    │ SiK B │ Arm → Navigate →    │
+│ Survey + detect │══════►│  filter SYSID=1 │══════►│ Center → Spray →    │
+│ Geotag → RTL    │       │  dedup + relay  │       │ Next target / RTL   │
+└─────────────────┘       └─────────────────┘       └─────────────────────┘
+   Cube Orange+              /dev/ttyUSB0,1             Cube Orange+
+   TF-Luna avoidance is handled by ArduPilot, never by ROS.
 ```
 
-### Geotag Data Flow: Drone 1 → GCS → Drone 2 (Step-by-Step)
+### Geotag data flow
 
-The system transmits geotagged disease locations from the survey drone to the sprayer drone using MAVLink STATUSTEXT messages relayed through a ground-based forwarder.
+| # | Stage | What happens |
+| - | ----- | ------------ |
+| 1 | **Detect** (D1, Pi 5) | HSV threshold for yellow patches, green-context and sand filtering, contour checks, drone GPS as position, 3 m haversine dedup → `/drone1/disease_geotag` |
+| 2 | **Encode** (D1 `telem_tx`) | `GEOTAG:10.048352,76.330968,0.0` as MAVLink `STATUSTEXT` (50-char limit) via `/mavros/statustext/send` |
+| 3 | **Radio A** | Cube → SiK 915 MHz → ground radio on `/dev/ttyUSB0` |
+| 4 | **Forward** (GCS) | pymavlink keeps `STATUSTEXT` from SYSID 1 starting with `GEOTAG:`, drops exact duplicates, resends on `/dev/ttyUSB1` |
+| 5 | **Radio B** | Ground radio → Drone-2 Cube |
+| 6 | **Decode** (D2 `telem_rx`) | Parses the string, validates coordinates → `/drone2/target_position` |
+| 7 | **Spray** (D2) | Navigate → visual-servo centering → spray relay → wait 10 s for the next geotag → RTL on timeout |
 
-```
-STEP 1: DETECTION (Drone 1 — Pi 5)
-├── Camera frame → HSV color thresholding (yellow H:15-40)
-├── Green vegetation context validation + sand exclusion
-├── Contour filtering (area >250px, shape checks)
-├── GPS: uses drone's current GPS position (simplified — no ray-casting)
-├── Dedup: haversine <3m from any prior detection → skip
-└── Publishes GeoPointStamped → /drone1/disease_geotag
-
-STEP 2: MAVLINK ENCODING (Drone 1 — telem_tx_node)
-├── Subscribes /drone1/disease_geotag
-├── Formats: "GEOTAG:10.048352,76.330968,0.0" (50 char MAVLink limit)
-├── Creates StatusText(severity=6, text=geotag_string)
-├── Publishes → /mavros/statustext/send
-└── MAVROS encodes as MAVLink STATUSTEXT (#253) → serial → Cube Orange+
-
-STEP 3: RADIO TRANSMISSION (Air → Ground)
-├── ArduPilot forwards STATUSTEXT over SiK telemetry radio
-├── 915MHz / 433MHz radio link (57600 baud, ~5.6 KB/s)
-└── Ground radio receives on /dev/ttyUSB0
-
-STEP 4: GCS FORWARDING (Ground Laptop — pymavlink)
-├── pymavlink recv_match() on /dev/ttyUSB0 (Drone 1 radio)
-├── Filter: msg.get_type() == 'STATUSTEXT'
-├── Filter: msg._header.srcSystem == 1 (Drone 1 SYSID)
-├── Filter: msg.text.startswith("GEOTAG:")
-├── Dedup: exact string match against last message
-├── Forward: drone2_conn.mav.statustext_send(severity, text)
-└── Sent via /dev/ttyUSB1 (Drone 2 ground radio)
-
-STEP 5: RADIO TRANSMISSION (Ground → Air)
-├── Ground radio (Radio B) transmits to Drone 2 air radio
-├── Cube Orange+ receives → MAVROS publishes /mavros/statustext/recv
-└── ROS2 message available on Drone 2's Pi 5
-
-STEP 6: GEOTAG DECODING (Drone 2 — telem_rx_node)
-├── Subscribes /mavros/statustext/recv
-├── Filter: text.startswith("GEOTAG:")
-├── Dedup: text != last_geotag (exact string)
-├── Parse: split(",") → lat, lon, alt
-├── Validate: lat ∈ [-90,90], lon ∈ [-180,180], not (0,0)
-├── Validate: haversine from home < 10km
-├── Optional: override altitude with configured target_altitude_m
-└── Publishes NavSatFix → /drone2/target_position
-
-STEP 7: AUTONOMOUS RESPONSE (Drone 2 — navigation + centering + spray)
-├── Navigation: GPS→ENU conversion, ARM→TAKEOFF→NAVIGATE to target
-├── Arrival: XY distance < 3m → publishes /drone2/arrival_status
-├── Centering: HSV re-detection + PID visual servoing (20Hz)
-├── Descent: 6.7m → 2m spray altitude at 0.3 m/s
-├── Spray: GPIO relay / FC relay (2.5s prime + 5s spray)
-├── Ascend: 2m → 6.7m at 0.5 m/s
-└── Wait 10s for next geotag → RTL if timeout
-```
-
-> **Dual encoding support**: The system supports both `STATUSTEXT` (primary, single message) and `NAMED_VALUE_FLOAT` (fallback, 3 messages: d_lat, d_lon, d_alt). STATUSTEXT is preferred for reliability.
+A `NAMED_VALUE_FLOAT` fallback (`d_lat`, `d_lon`, `d_alt`) is supported; `STATUSTEXT` is preferred because it arrives as a single message.
 
 ---
 
-## 📁 Workspace Structure
+## Repository layout
 
-| Workspace   | Packages | Description                                                                                 |
-| ----------- | -------- | ------------------------------------------------------------------------------------------- |
-| `drone1_ws` | 7        | Survey drone - KML planning, navigation, detection, telemetry TX                            |
-| `drone2_ws` | 6        | Sprayer drone - **unified navigation** ⚡, **merged detection+centering** ⚡, spray control |
+| Path | Contents |
+| ---- | -------- |
+| [`drone1_ws/`](drone1_ws/) | Survey drone, 7 packages: KML planner, navigation, image capture, detection and geotag, telemetry TX, messages, bringup |
+| [`drone2_ws/`](drone2_ws/) | Sprayer drone, 6 packages: telemetry RX, unified navigation, merged detection and centering, sprayer control, messages, bringup |
+| [`gcs_ws/`](gcs_ws/) | Ground station `gcs_forwarder` relay |
+| [`terrain/`](terrain/) | SRTM terrain tiles for SITL |
+| `launch_drone{1,2}_test.sh` | SITL test launchers |
+| `autostart_drone1.sh` | Boot-time launcher for Drone-1 |
+| `send_test_geotag.sh` | Inject a fake geotag for Drone-2 testing |
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) · [`SITL_TESTING_GUIDE.md`](SITL_TESTING_GUIDE.md) · [`HARDWARE_TESTING.md`](HARDWARE_TESTING.md) · [`TELEMETRY_HARDWARE_TEST.md`](TELEMETRY_HARDWARE_TEST.md) | Simulation, hardware and telemetry guides |
 
-> **Note**: Direct drone-to-drone telemetry communication (no GCS required).  
-> ⚡ **Optimized**: Drone-2 uses merged nodes for lower latency and simplified architecture.
-
----
-
-## 📖 Node Documentation
-
-### 🔗 Developer Documentation
-
-**NEW**: Comprehensive developer documentation with complete code analysis!
-
-- **[📁 Drone-1 Developer Docs](drone1_ws/developers_debug/)** - All 5 nodes documented
-- **[📁 Drone-2 Developer Docs](drone2_ws/developers_debug/)** - All 4 nodes documented
-
-Each document includes:
-
-- Complete logic & reasoning behind design decisions
-- All subscribers, publishers, services with descriptions
-- Parameter tables with defaults and explanations
-- Key functions with built-in Python/ROS2 function explanations
-- Package dependencies (ROS2 packages + Python libraries)
-- Error handling and troubleshooting guides
-- Testing checklists
+Drone-2 merged mission management into `drone2_navigation` and merged detection with centering, which cut it from 9 to 6 packages and roughly halved inter-node latency.
 
 ---
 
-### Drone-1 (Survey System) - 5 Nodes
+## Nodes
 
-| Node                     | Description                                | Quick Ref                                         | Dev Docs                                                                         |
-| ------------------------ | ------------------------------------------ | ------------------------------------------------- | -------------------------------------------------------------------------------- |
-| **KML Lane Planner**     | Converts KML boundaries to survey paths    | [📄 Package](drone1_ws/src/kml_lane_planner/)     | [📖 Developer Guide](drone1_ws/developers_debug/02_KML_LANE_PLANNER_NODE.md)     |
-| **Drone-1 Navigation**   | Executes survey waypoints via MAVROS       | [📄 Package](drone1_ws/src/drone1_navigation/)    | [📖 Developer Guide](drone1_ws/developers_debug/01_DRONE1_NAVIGATION_NODE.md)    |
-| **Image Capture**        | USB camera interface for survey            | [📄 Package](drone1_ws/src/image_capture/)        | [📖 Developer Guide](drone1_ws/developers_debug/03_IMAGE_CAPTURE_NODE.md)        |
-| **Detection & Geotag**   | Disease detection + GPS (uses current GPS) | [📄 Package](drone1_ws/src/detection_and_geotag/) | [📖 Developer Guide](drone1_ws/developers_debug/04_DETECTION_AND_GEOTAG_NODE.md) |
-| **Telemetry TX** _(NEW)_ | Transmits geotags over MAVLink telemetry   | [📄 Package](drone1_ws/src/telem_tx/)             | [📖 Developer Guide](drone1_ws/developers_debug/05_TELEM_TX_NODE.md)             |
+### Drone-1: survey
 
-### Drone-2 (Sprayer System) - 4 Nodes
+| Node | Role | Dev guide |
+| ---- | ---- | --------- |
+| **KML Lane Planner** | Watches `missions/` for a KML boundary, converts WGS84 to ENU, builds a boustrophedon lane pattern from the corner nearest home, publishes `LaneSegmentArray` | [guide](drone1_ws/developers_debug/02_KML_LANE_PLANNER_NODE.md) |
+| **Navigation** | Auto-arm, takeoff (default 6.7 m / 22 ft), pure-pursuit path following via MAVROS, auto-RTL. `IDLE → ARMING → TAKING_OFF → NAVIGATING → MISSION_COMPLETE → RETURNING_HOME` | [guide](drone1_ws/developers_debug/01_DRONE1_NAVIGATION_NODE.md) |
+| **Image Capture** | USB camera interface | [guide](drone1_ws/developers_debug/03_IMAGE_CAPTURE_NODE.md) |
+| **Detection & Geotag** | HSV disease detection, CSV log, dedup | [guide](drone1_ws/developers_debug/04_DETECTION_AND_GEOTAG_NODE.md) |
+| **Telemetry TX** | Encodes geotags into MAVLink for the radio | [guide](drone1_ws/developers_debug/05_TELEM_TX_NODE.md) |
 
-| Node                                    | Description                                | Quick Ref                                                  | Dev Docs                                                                           |
-| --------------------------------------- | ------------------------------------------ | ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| **Telemetry RX** _(NEW)_                | Receives geotags from telemetry            | [📄 Package](drone2_ws/src/telem_rx/)                      | [📖 Developer Guide](drone2_ws/developers_debug/01_TELEM_RX_NODE.md)               |
-| **Drone-2 Navigation** ⚡               | **Unified** autonomous controller          | [📄 Package](drone2_ws/src/drone2_navigation/)             | [📖 Developer Guide](drone2_ws/developers_debug/02_DRONE2_NAVIGATION_NODE.md) ⚡   |
-| **Detection & Centering** ⚡ _(MERGED)_ | **Combined** detection and visual servoing | [📄 Package](drone2_ws/src/local_detection_and_centering/) | [📖 Developer Guide](drone2_ws/developers_debug/03_DETECTION_CENTERING_NODE.md) ⚡ |
-| **Sprayer Control**                     | FC relay via MAVROS + safety checks        | [📄 Package](drone2_ws/src/sprayer_control/)               | [📖 Developer Guide](drone2_ws/developers_debug/04_SPRAYER_CONTROL_NODE.md)        |
+### Drone-2: sprayer
 
-> ⚡ **Architecture Note**: `mission_manager` was removed - functionality merged into `drone2_navigation` for simpler unified control
+| Node | Role | Dev guide |
+| ---- | ---- | --------- |
+| **Telemetry RX** | Decodes geotags, validates, dispatches targets | [guide](drone2_ws/developers_debug/01_TELEM_RX_NODE.md) |
+| **Navigation** (unified) | `IDLE → ARM → TAKEOFF → NAVIGATE → ARRIVED → WAIT_SPRAY → WAIT_FOR_NEXT → RTL`, haversine arrival check, timeout RTL | [guide](drone2_ws/developers_debug/02_DRONE2_NAVIGATION_NODE.md) |
+| **Detection & Centering** (merged) | Local HSV detection plus PID visual servoing; signals spray-ready when centered | [guide](drone2_ws/developers_debug/03_DETECTION_CENTERING_NODE.md) |
+| **Sprayer Control** | Safety checks, then `MAV_CMD_DO_SET_RELAY` on the flight controller; publishes `/drone2/spray_done` | [guide](drone2_ws/developers_debug/04_SPRAYER_CONTROL_NODE.md) |
 
----
+### GCS
 
-## 🔍 What Each Node Does
+| Node | Role | Dev guide |
+| ---- | ---- | --------- |
+| **GCS Forwarder** | pymavlink relay D1 → D2 with filtering and dedup | [guide](gcs_ws/developers_debug/01_GCS_FORWARDER_NODE.md) |
 
-### Drone-1 (Survey System)
-
-#### 🗺️ KML Lane Planner Node
-
-Watches the `missions/` folder for KML files defining field boundaries. When a new KML is detected, it **automatically triggers the full mission sequence**:
-
-- Parses the KML polygon coordinates
-- Converts WGS84 (GPS) to local ENU coordinates for path planning
-- Generates parallel survey lines (lawnmower pattern)
-- Optimizes starting waypoint closest to home position
-- Publishes `LaneSegmentArray` messages to trigger navigation
-
-**Key Features**: Smart corner detection, configurable lane spacing, automatic home position fallback for SITL
-
----
-
-#### 🧭 Drone-1 Navigation Node
-
-**FULLY AUTONOMOUS** - Executes survey mission with automatic arming, takeoff, and RTL:
-
-- Subscribes to `LaneSegmentArray` for mission waypoints
-- **Auto-arms** when mission is received
-- **Auto-takes off** to mission altitude
-- Navigates survey pattern via MAVROS `GlobalPositionTarget`
-- **Auto-RTL** when survey complete
-- State machine: `IDLE → ARMING → TAKING_OFF → NAVIGATING → MISSION_COMPLETE → RETURNING_HOME`
-
-**Key Features**: Zero manual intervention required, configurable via parameters:
-
-- `auto_arm`, `auto_takeoff`, `auto_rtl` (all default `true`)
-- `takeoff_altitude_m` (default **6.7m / 22 feet**)
-
----
-
-#### 🔬 Detection and Geotag Node
-
-Processes camera frames to detect crop disease (yellow spots) and records GPS coordinates:
-
-- Subscribes to camera images and GPS data
-- Performs HSV color thresholding to detect yellow disease patches
-- **Uses current drone GPS** when disease is detected (simplified approach)
-- De-duplicates detections within configurable radius
-- Logs all detections to CSV file
-
-**Key Features**: Configurable HSV thresholds (H:20-35, S:50-255, V:50-255), severity classification, duplicate filtering, debug visualization
-
-> ⚡ **Simplified (Jan 2026)**: Replaced complex ray-casting with current GPS - Drone-2's visual servoing provides final precision
-
----
-
-#### 📡 Telemetry TX Node
-
-Transmits disease geotags directly to Drone-2 over MAVLink telemetry (SiK radio):
-
-- Subscribes to `/drone1/disease_geotag`
-- Encodes GPS coordinates as `DebugValue` messages (TYPE_NAMED_VALUE_FLOAT):
-  - `d_lat` → latitude
-  - `d_lon` → longitude
-  - `d_alt` → altitude
-- Publishes to `/mavros/debug_value/send`
-- MAVROS forwards to autopilot, which transmits over telemetry
-
-**Key Features**: No GCS dependency, direct drone-to-drone communication, preserves all detection data
-
----
-
-### Drone-2 (Sprayer System)
-
-#### 📡 Telemetry RX Node
-
-Receives disease geotags from Drone-1 via MAVLink telemetry and dispatches to navigation:
-
-- Subscribes to `/mavros/debug_value/recv`
-- Buffers incoming `d_lat`, `d_lon`, `d_alt` fields
-- Validates coordinates and dispatches to navigation
-- Publishes to `/drone2/target_position` and `/drone2/new_target_received`
-
-**Key Features**: Coordinate validation, configurable altitude, message buffering with timeout
-
----
-
-#### 🧭 Drone-2 Navigation Node ⚡ _(Unified)_
-
-**UNIFIED ARCHITECTURE** - Merged mission management + navigation for simplified control:
-
-- Subscribes to target coordinates from telemetry RX
-- **Auto-arms and takes off** on first geotag (no manual intervention)
-- Navigates using `GlobalPositionTarget` via MAVROS
-- Monitors arrival using Haversine distance calculation
-- **WAIT_SPRAY state** - waits for spray_done signal before continuing
-- **Configurable wait window** after spray for next target
-- **Auto-RTL** if no new target received within timeout
-
-**State Machine**: `IDLE → ARM → TAKEOFF → NAVIGATE → ARRIVED → WAIT_SPRAY → WAIT_FOR_NEXT → RTL`
-
-**Key Features**: Complete autonomous lifecycle, WAIT_SPRAY integration, timeout protection, arrival detection
-
-> ⚡ **Updated (Jan 2026)**: Added WAIT_SPRAY state, listens to `/drone2/spray_done`
-
----
-
-#### 🎯 Detection & Centering Node ⚡ _(Merged)_
-
-**OPTIMIZED ARCHITECTURE** - Combined local detection + visual servoing in single node:
-
-- Triggered by arrival status from navigation node
-- Performs HSV-based disease detection on camera images
-- Computes target bounding box and centroid in image frame
-- Executes PID visual servoing for precise alignment over target
-- Publishes velocity commands (`/mavros/setpoint_velocity/cmd_vel_unstamped`)
-- Signals spray-ready when target centered within threshold
-- Returns control to navigation after spray completion
-
-**Key Features**: Reduced latency (no inter-node communication), unified image processing pipeline, smooth control transitions, configurable detection confidence and centering PID gains
-
-> ⚡ **Architecture Note**: Previously separate `local_detection` and `centering_controller` now merged for 50% lower latency
-
----
-
-#### 💧 Sprayer Control Node
-
-Controls spray actuation via Orange Cube+ FC relay with safety checks:
-
-- Subscribes to spray-ready signal from detection & centering
-- Validates safety conditions (armed, altitude, mode)
-- **Activates FC relay via MAVROS** (`MAV_CMD_DO_SET_RELAY`)
-- Maintains spray for configured duration
-- Publishes completion status to `/drone2/spray_done`
-
-**Key Features**: FC relay control, hardware safety interlocks, configurable duration
-
-**ArduPilot Setup**:
+Sprayer relay setup on the Cube:
 
 ```
 RELAY1_PIN = 54        # AUX5
@@ -301,310 +109,101 @@ RELAY1_DEFAULT = 0
 RELAY1_FUNCTION = 1
 ```
 
-> ⚡ **Updated (Jan 2026)**: Changed from PWM topic to FC relay via MAVROS for direct Orange Cube+ control
-
 ---
 
-## 🚀 Quick Start
+## Quick start
 
-> **📖 For complete simulation and real flight instructions, see [DEPLOYMENT.md](DEPLOYMENT.md)**
+Full instructions: [DEPLOYMENT.md](DEPLOYMENT.md).
 
-### Prerequisites
+```bash
+# Dependencies (Ubuntu / ROS 2 Jazzy)
+sudo apt install ros-${ROS_DISTRO}-mavros ros-${ROS_DISTRO}-mavros-extras \
+                 ros-${ROS_DISTRO}-cv-bridge ros-${ROS_DISTRO}-vision-msgs \
+                 ros-${ROS_DISTRO}-geographic-msgs
+pip3 install scipy geopy pymavlink
 
-```zsh
-# ROS2 dependencies
-sudo apt install ros-${ROS_DISTRO}-mavros ros-${ROS_DISTRO}-mavros-extras
-sudo apt install ros-${ROS_DISTRO}-cv-bridge ros-${ROS_DISTRO}-vision-msgs
-sudo apt install ros-${ROS_DISTRO}-geographic-msgs
+# Build each workspace
+cd drone1_ws && colcon build --symlink-install && source install/setup.bash
+cd ../drone2_ws && colcon build --symlink-install && source install/setup.bash
 
-# Python dependencies
-pip3 install scipy geopy
-```
-
-### Build All Workspaces
-
-```zsh
-# Drone-1
-cd ~/Documents/ROSArkairo/drone1_ws
-colcon build --symlink-install
-source install/setup.zsh
-
-# Drone-2
-cd ~/Documents/ROSArkairo/drone2_ws
-colcon build --symlink-install
-source install/setup.zsh
-```
-
-### Launch Systems (Direct Telemetry Mode)
-
-```zsh
-# Terminal 1 - Drone-1 Survey (includes telemetry TX)
+# Launch (one per vehicle) and run the ground relay on the laptop
 ros2 launch drone1_bringup drone1_survey.launch.py
-
-# Terminal 2 - Drone-2 Sprayer (includes telemetry RX)
 ros2 launch drone2_bringup drone2_sprayer.launch.py
-
-# NO GCS REQUIRED!
 ```
 
-### Run a Mission (Fully Autonomous)
+Start a mission by dropping a KML boundary into `drone1_ws/missions/`. Drone-1 arms, takes off, surveys, transmits geotags and returns home. Drone-2 waits for the first geotag, then arms, flies, sprays and moves to the next target or returns home.
 
-```zsh
-# Drop KML file to start - everything else is automatic!
-cp field_boundary.kml ~/Documents/ROSArkairo/drone1_ws/missions/
+---
 
-# Drone-1 will: Arm → Takeoff (22ft) → Survey → Detect → Transmit geotags → RTL
-# Drone-2 will: Wait → Receive geotag → Arm → Fly → Spray → Wait 5s → Next/RTL
+## Testing
+
+SITL needs ArduPilot (`sim_vehicle.py`), MAVROS, and built workspaces.
+
+```bash
+./launch_drone1_test.sh     # Drone-1 SITL stack
+./launch_drone2_test.sh     # Drone-2 SITL stack
+./send_test_geotag.sh       # inject a geotag for Drone-2
 ```
 
----
+In SITL only, `param set ARMING_CHECK 0` in MAVProxy disables arming checks. **Never do this on real hardware.**
 
-## 📡 Topic Reference
+| Symptom | Fix |
+| ------- | --- |
+| "FCU timeout" | Start MAVROS first and wait for `FCU: ArduCopter` |
+| "No waypoints" | Restart the KML planner after navigation is running |
+| "Takeoff timeout" | Wait ~30 s after SITL starts before launching navigation |
+| Drone not moving | Check `ros2 topic list \| grep mavros` |
 
-### Drone-1 → GCS → Drone-2 (Telemetry Relay)
-
-| Stage | Topic / Channel | Type | Description |
-| ----- | -------------- | ---- | ----------- |
-| D1 Detection | `/drone1/disease_geotag` | GeoPointStamped | Detected disease GPS |
-| D1 Encoding (primary) | `/mavros/statustext/send` | StatusText | `GEOTAG:lat,lon,alt` format |
-| D1 Encoding (fallback) | `/mavros/debug_value/send` | DebugValue | d_lat, d_lon, d_alt |
-| Radio A | SiK 915MHz Air→Ground | MAVLink | STATUSTEXT #253 |
-| GCS Forward | pymavlink `/dev/ttyUSB0` → `/dev/ttyUSB1` | MAVLink | Filter + dedup + relay |
-| Radio B | SiK 915MHz Ground→Air | MAVLink | STATUSTEXT #253 |
-| D2 Decoding (primary) | `/mavros/statustext/recv` | StatusText | Parse GEOTAG string |
-| D2 Decoding (fallback) | `/mavros/debug_value/recv` | DebugValue | Buffer d_lat/d_lon/d_alt |
-| D2 Target | `/drone2/target_position` | NavSatFix | Navigation target |
-
-### Drone-2 Internal
-
-| Topic | Type | Publisher | Subscriber |
-| ----- | ---- | --------- | ---------- |
-| `/drone2/target_position` | NavSatFix | telem_rx | drone2_navigation |
-| `/drone2/arrival_status` | Bool | drone2_navigation | detection_centering |
-| `/drone2/spray_ready` | Bool | detection_centering | sprayer_control |
-| `/drone2/spray_done` | Bool | sprayer_control | drone2_navigation |
-| `/drone2/navigation_status` | String | drone2_navigation | monitoring |
-| `/drone2/detection_status` | Bool | detection_centering | monitoring |
-
-### GCS Component
-
-| Component | Technology | Ports | Purpose |
-| --------- | ---------- | ----- | ------- |
-| GCS Forwarder | pymavlink (Python) | `/dev/ttyUSB0` (D1), `/dev/ttyUSB1` (D2) | Relay GEOTAG STATUSTEXT from Drone 1 to Drone 2 |
+More in [SITL_TESTING_GUIDE.md](SITL_TESTING_GUIDE.md) and [HARDWARE_TESTING.md](HARDWARE_TESTING.md).
 
 ---
 
-## 🔧 Key Algorithms
+## Topic reference
 
-| Algorithm | Location | Description |
-| --------- | -------- | ----------- |
-| **Pure-Pursuit Path Following** | Drone-1 Navigation | Lookahead-based polyline tracking for smooth survey patterns |
-| **ENU↔GPS Conversion** | Lane Planner (WGS84), Nav Nodes (flat-earth) | Coordinate frame conversions |
-| **HSV Disease Detection** | Detection Nodes (both drones) | Yellow thresholding + green context validation |
-| **PID Visual Servoing** | Drone-2 Centering | Image-space error → velocity commands for alignment |
-| **Boustrophedon Survey** | KML Lane Planner | Serpentine parallel-line survey pattern generation |
-| **MAVLink STATUSTEXT** | Telemetry TX/RX + GCS | `GEOTAG:lat,lon,alt` encoding (50 char limit) |
-| **Haversine Distance** | All navigation + dedup | GPS distance for arrival detection + geotag dedup |
-| **GPS Dedup Filtering** | Detection Node | 3m radius exclusion using logged detection list |
+### Drone-2 internal
 
----
+| Topic | Type | Publisher → Subscriber |
+| ----- | ---- | ---------------------- |
+| `/drone2/target_position` | NavSatFix | telem_rx → drone2_navigation |
+| `/drone2/arrival_status` | Bool | drone2_navigation → detection_centering |
+| `/drone2/spray_ready` | Bool | detection_centering → sprayer_control |
+| `/drone2/spray_done` | Bool | sprayer_control → drone2_navigation |
+| `/drone2/navigation_status` | String | drone2_navigation → monitoring |
+| `/drone2/detection_status` | Bool | detection_centering → monitoring |
 
-## ⚠️ Design Rules
+### Cross-drone
 
-| Rule                                 | Reason                         |
-| ------------------------------------ | ------------------------------ |
-| ❌ ROS never touches TF-Luna         | Flight controller owns sensors |
-| ❌ No UDP/DDS bridges between drones | Prevents network dependency    |
-| ✅ MAVROS is the only FC interface   | Standardized MAVLink           |
-| ✅ MAVLink for inter-drone comms     | Uses existing telemetry link   |
-| ✅ One node = one responsibility     | Clean architecture             |
+| Channel | Type | Notes |
+| ------- | ---- | ----- |
+| `/drone1/disease_geotag` | GeoPointStamped | Detection output |
+| `/mavros/statustext/send` · `/recv` | StatusText | Primary `GEOTAG:lat,lon,alt` |
+| `/mavros/debug_value/send` · `/recv` | DebugValue | Fallback `d_lat`, `d_lon`, `d_alt` |
 
 ---
 
-## 📦 Package Summary
+## Design rules
 
-| Workspace | Message Pkgs | Node Pkgs | Launch Pkgs | **Total** |
-| --------- | ------------ | --------- | ----------- | --------- |
-| drone1_ws | 1            | 5         | 1           | **7**     |
-| drone2_ws | 1            | 3         | 1           | **6**     |
-| **Total** | **2**        | **8**     | **2**       | **13**    |
+| Rule | Reason |
+| ---- | ------ |
+| ROS never touches the TF-Luna | The flight controller owns sensors |
+| No UDP/DDS bridges between drones | No network dependency |
+| MAVROS is the only FC interface | Standardized MAVLink |
+| MAVLink for inter-drone comms | Reuses the telemetry link |
+| One node, one responsibility | Clean architecture |
 
-**Architecture Optimization**:
-
-- ✅ **Drone-2**: Reduced from 9→6 packages (removed mission_manager, local_detection, centering_controller)
-- ⚡ **Latency**: 50% reduction with merged detection+centering
-- 🎯 **Simplicity**: Unified navigation replaces 2-node state coordination
-- 👍 **No GCS**: Direct drone-to-drone telemetry eliminates ground station dependency
+Algorithms in use: pure-pursuit path following, boustrophedon coverage, ENU/WGS84 conversion, HSV detection with green-context validation, PID visual servoing, haversine distance for arrival and dedup.
 
 ---
 
-## 🧪 SITL Testing Guide (Drone-1)
+## Documentation
 
-> **📖 For Drone-2 testing, see [QUICK_START_UPDATED_DRONE2.md](QUICK_START_UPDATED_DRONE2.md)**
-
-### Prerequisites
-
-- ArduPilot SITL installed (`sim_vehicle.py` available)
-- MAVROS installed for ROS 2
-- All workspaces built: `colcon build --symlink-install`
-
-### 4-Terminal Setup
-
-**Terminal 1 - ArduCopter SITL at Kerala Location:**
-
-```zsh
-cd ~/Documents/ROSArkairo
-./start_sitl_kerala.sh
-```
-
-✅ Wait for: `APM: EKF2 IMU0 is using GPS` and `Ready to FLY`
-
-**🔧 In the MAVProxy console (SITL window), disable horizon check for indoor SITL testing:**
-
-```
-param set AHRS_EKF_TYPE 3
-param set ARMING_CHECK 0
-```
-
-This disables arming checks for SITL. **DO NOT use on real hardware!**
+Every node has a developer guide covering logic, pub/sub, parameters, key functions, dependencies, error handling and test checklists:
+[`drone1_ws/developers_debug/`](drone1_ws/developers_debug/) · [`drone2_ws/developers_debug/`](drone2_ws/developers_debug/) · [`gcs_ws/developers_debug/`](gcs_ws/developers_debug/). New to the project? Read the Drone-1 navigation guide first, then detection, then Drone-2 navigation.
 
 ---
 
-**Terminal 2 - MAVROS:**
+## License
 
-```zsh
-cd ~/Documents/ROSArkairo/drone1_ws
-source install/setup.zsh
-ros2 run mavros mavros_node --ros-args \
-  -p fcu_url:=udp://:14550@127.0.0.1:14555 \
-  -p gcs_url:=udp://@127.0.0.1:14550
-```
+Apache 2.0, see [LICENSE](LICENSE).
 
-✅ Wait for: `[INFO] [mavros.sys]: FCU: ArduCopter V4.X.X`
-
----
-
-**Terminal 3 - KML Lane Planner:**
-
-```zsh
-cd ~/Documents/ROSArkairo/drone1_ws
-source install/setup.zsh
-ros2 run kml_lane_planner kml_lane_planner_node --ros-args \
-  -p missions_folder:=$HOME/Documents/ROSArkairo/drone1_ws/missions \
-  -p kml_filename:=SOE.kml \
-  -p lane_spacing_m:=10.0 \
-  -p altitude_m:=50.0
-```
-
----
-
-**Terminal 4 - Navigation Node:**
-
-```zsh
-cd ~/Documents/ROSArkairo/drone1_ws
-source install/setup.zsh
-ros2 run drone1_navigation drone1_navigation_node --ros-args \
-  --params-file src/drone1_navigation/config/navigation_params.yaml
-```
-
-### Monitoring
-
-```zsh
-cd ~/Documents/ROSArkairo/drone1_ws
-source install/setup.zsh
-ros2 topic list | grep -E "mavros|mission|detection"
-ros2 topic echo /drone1/navigation_status
-ros2 topic echo /drone1/detection_enable
-```
-
-### Troubleshooting
-
-| Issue             | Solution                                                             |
-| ----------------- | -------------------------------------------------------------------- |
-| "FCU timeout"     | Ensure Terminal 2 (MAVROS) is running with `FCU: ArduCopter` message |
-| "No waypoints"    | Restart Terminal 3 (KML planner) after Terminal 4 is running         |
-| "Takeoff timeout" | Wait 30s after SITL starts before running navigation node            |
-| Drone not moving  | Check MAVROS topics exist: `ros2 topic list \| grep mavros`          |
-
----
-
-## 📚 Infrastructure Packages
-
-### **Bringup Packages** (drone1_bringup / drone2_bringup)
-
-Launch orchestration for multi-node systems:
-
-- Python launch files that start all nodes with parameters
-- Config files (YAML) for node parameters
-- Single command launches entire system: `ros2 launch drone2_bringup drone2_sprayer.launch.py`
-
-### **Message Packages** (drone1_msgs / drone2_msgs)
-
-Custom ROS2 message definitions:
-
-- **drone1_msgs**: `LaneSegment`, `LaneSegmentArray`, `Waypoint` (mission planning)
-- **drone2_msgs**: `MissionState`, `SprayerStatus` (sprayer operations)
-- Compiled into Python/C++ interfaces during `colcon build`
-
----
-
-## 📋 Developer Documentation
-
-**NEW**: Comprehensive developer documentation available in each workspace!
-
-### 🔧 Drone-1 Developer Docs
-
-**Location**: [`drone1_ws/developers_debug/`](drone1_ws/developers_debug/)
-
-Detailed documentation for all Drone-1 nodes:
-
-- **[Drone1 Navigation Node](drone1_ws/developers_debug/01_DRONE1_NAVIGATION_NODE.md)** - Autonomous flight controller
-- **[KML Lane Planner Node](drone1_ws/developers_debug/02_KML_LANE_PLANNER_NODE.md)** - Mission planning algorithms
-- **[Image Capture Node](drone1_ws/developers_debug/03_IMAGE_CAPTURE_NODE.md)** - Camera interface
-- **[Detection & Geotag Node](drone1_ws/developers_debug/04_DETECTION_AND_GEOTAG_NODE.md)** - Computer vision + GPS
-- **[Telemetry TX Node](drone1_ws/developers_debug/05_TELEM_TX_NODE.md)** - MAVLink transmission
-
-### 🚁 Drone-2 Developer Docs
-
-**Location**: [`drone2_ws/developers_debug/`](drone2_ws/developers_debug/)
-
-Detailed documentation for all Drone-2 nodes:
-
-- **[Telemetry RX Node](drone2_ws/developers_debug/01_TELEM_RX_NODE.md)** - MAVLink reception
-- **[Drone2 Navigation Node](drone2_ws/developers_debug/02_DRONE2_NAVIGATION_NODE.md)** ⚡ Unified controller
-- **[Detection & Centering Node](drone2_ws/developers_debug/03_DETECTION_CENTERING_NODE.md)** ⚡ Merged visual servoing
-- **[Sprayer Control Node](drone2_ws/developers_debug/04_SPRAYER_CONTROL_NODE.md)** - Pump control
-
-### 📖 What's Included in Each Document
-
-- ✅ **Complete node overview** (file path, package, purpose)
-- ✅ **Logic & reasoning** behind design decisions
-- ✅ **All subscribers & publishers** with descriptions
-- ✅ **Parameter tables** with defaults and explanations
-- ✅ **Key functions** with built-in Python/ROS2 function explanations
-- ✅ **Package dependencies** (ROS2 packages + Python libraries)
-- ✅ **Error handling** and troubleshooting
-- ✅ **Testing checklists**
-
-### 🎯 Quick Start for Developers
-
-**New to the project?**
-
-1. Start with [Drone1 Navigation](drone1_ws/developers_debug/01_DRONE1_NAVIGATION_NODE.md) to understand autonomous flight
-2. Read [Detection & Geotag](drone1_ws/developers_debug/04_DETECTION_AND_GEOTAG_NODE.md) for computer vision pipeline
-3. Review [Drone2 Navigation](drone2_ws/developers_debug/02_DRONE2_NAVIGATION_NODE.md) for unified architecture
-
-**Want to modify a specific node?**  
-Each document is self-contained with all dependencies and logic explained in detail.
-
----
-
-## �📜 License
-
-Apache 2.0 - See LICENSE file for details.
-
----
-
-**Made by Shaan Shoukath**
-
-_Built for precision agriculture with safety-first autonomous drone coordination._
+**Made by Shaan Shoukath** · built for precision agriculture with safety-first autonomous drone coordination.
