@@ -72,7 +72,11 @@ kml_missions/
 
 # Core dumps
 core
+
+# Generated mission output / flight logs
+*.waypoints
+*.tlog.raw
+*.parm
 rony_launch_drone1_test.sh
 rony_launch_drone2_test.sh
-
 interview_prep/
